@@ -1,97 +1,285 @@
-//! CTM rule parsing: OptiFine-style `.properties` rule files, the format
-//! resource packs already ship (matchBlocks / method / tiles / layer).
-//!
-//! Behavioral contract: line-based key=value, `#` comments, `tiles` as
-//! comma/space separated names or numeric ranges (`0-3`), `method` one of
-//! `ctm`, `ctm_compact`, `horizontal`, `vertical`, `random`. Unknown keys and
-//! blank lines are ignored, so packs keep loading on a newer format.
+//! 1:1 of the Continuity client.config classes, by PepperCode1 (LGPL-3.0-only,
+//! https://github.com/PepperCode1/Continuity). Upstream files:
+//! src/main/java/me/pepperbell/continuity/client/config/{Option,ContinuityConfig}.java.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    /// Full 47-tile CTM (8-neighborhood, inner corners).
-    Ctm,
-    /// Compact 5-tile CTM (orthogonal neighbors only).
-    CtmCompact,
-    /// 4-tile horizontal connect along X.
-    Horizontal,
-    /// 4-tile vertical connect along Z.
-    Vertical,
-    /// One tile chosen per position, deterministic in the position seed.
-    Random,
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::thread_local;
+
+/// java: com.google.gson.JsonElement (engine surface; only the shapes the config
+/// touches: primitives and objects, object order preserved).
+#[derive(Clone, Debug, PartialEq)]
+pub enum JsonElement {
+    /// java: JsonPrimitive (boolean form only; the config only reads/writes booleans).
+    Primitive(bool),
+    Object(Vec<(String, JsonElement)>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rule {
-    /// Blocks this rule applies to (exact ids).
-    pub blockstates: Vec<String>,
-    pub method: Method,
-    pub tiles: Vec<String>,
+impl JsonElement {
+    /// java: isJsonObject().
+    pub fn is_json_object(&self) -> bool {
+        matches!(self, JsonElement::Object(_))
+    }
+
+    /// java: JsonObject.get(String).
+    pub fn get(&self, key: &str) -> Option<&JsonElement> {
+        match self {
+            JsonElement::Object(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// java: JsonElement.getAsBoolean().
+    pub fn get_as_boolean(&self) -> bool {
+        match self {
+            JsonElement::Primitive(value) => *value,
+            _ => false,
+        }
+    }
 }
 
-impl Rule {
-    pub fn new(block: &str, method: Method, tiles: Vec<String>) -> Self {
-        Self { blockstates: vec![block.to_string()], method, tiles }
+/// java: JsonParseException (engine surface).
+pub type JsonParseException = String;
+
+/// java: client.config.Option<T>. Renamed ConfigOption in Rust to avoid shadowing
+/// std::option::Option.
+pub trait ConfigOption {
+    /// java: getKey().
+    fn get_key(&self) -> &str;
+
+    /// java: get().
+    fn get(&self) -> bool;
+
+    /// java: set(T value).
+    fn set(&self, value: bool);
+
+    /// java: toJson().
+    fn to_json(&self) -> JsonElement;
+
+    /// java: fromJson(JsonElement) throws JsonParseException.
+    fn from_json(&self, json: &JsonElement) -> Result<(), JsonParseException>;
+}
+
+/// java: Option.BaseOption<T> / Option.BooleanOption (only the boolean option
+/// exists upstream; the generic base is carried into the one concrete class).
+pub struct BooleanOption {
+    key: String,
+    value: Cell<bool>,
+}
+
+impl BooleanOption {
+    /// java: BaseOption(String key, T defaultValue).
+    pub fn new(key: &str, default_value: bool) -> BooleanOption {
+        BooleanOption { key: key.to_string(), value: Cell::new(default_value) }
     }
 
-    pub fn matches(&self, block: &str) -> bool {
-        self.blockstates.iter().any(|b| b == block)
+    /// java: BaseOption.get().
+    pub fn get(&self) -> bool {
+        self.value.get()
     }
 
-    /// The tile name for a selection index, saturating on out-of-range so a
-    /// short tile list degrades to its last entry instead of panicking.
-    pub fn tile(&self, idx: usize) -> String {
-        self.tiles[idx.min(self.tiles.len() - 1)].clone()
+    /// java: BaseOption.set(T value).
+    pub fn set(&self, value: bool) {
+        self.value.set(value);
+    }
+}
+
+impl ConfigOption for BooleanOption {
+    fn get_key(&self) -> &str {
+        &self.key
     }
 
-    /// Parse one rule file's text; returns None when it carries no method or
-    /// no blocks (not a CTM rule).
-    pub fn parse(text: &str) -> Option<Self> {
-        let mut method = None;
-        let mut blocks = Vec::new();
-        let mut tiles = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+    fn get(&self) -> bool {
+        self.value.get()
+    }
+
+    fn set(&self, value: bool) {
+        self.value.set(value);
+    }
+
+    /// java: BooleanOption.toJson() = new JsonPrimitive(get()).
+    fn to_json(&self) -> JsonElement {
+        JsonElement::Primitive(self.get())
+    }
+
+    /// java: BooleanOption.fromJson(JsonElement): primitive -> set(getAsBoolean),
+    /// else throw JsonParseException("Json must be a primitive").
+    fn from_json(&self, json: &JsonElement) -> Result<(), JsonParseException> {
+        match json {
+            JsonElement::Primitive(_) => {
+                self.set(json.get_as_boolean());
+                Ok(())
             }
-            let (key, value) = line.split_once('=')?;
-            let value = value.trim();
-            match key.trim() {
-                "method" => method = Some(match value {
-                    "ctm" => Method::Ctm,
-                    "ctm_compact" => Method::CtmCompact,
-                    "horizontal" => Method::Horizontal,
-                    "vertical" => Method::Vertical,
-                    "random" => Method::Random,
-                    _ => continue,
-                }),
-                "matchBlocks" | "matchblock" | "block" => {
-                    blocks.extend(value.split(|c: char| c == ',' || c == ' ').filter(|s| !s.is_empty()).map(|s| s.to_string()))
-                }
-                "tiles" | "tile" => {
-                    for tok in value.split(|c: char| c == ',' || c == ' ').filter(|s| !s.is_empty()) {
-                        if let Some((a, b)) = tok.split_once('-') {
-                            if let (Ok(a), Ok(b)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
-                                for n in a..=b {
-                                    tiles.push(n.to_string());
-                                }
-                                continue;
-                            }
-                        }
-                        tiles.push(tok.to_string());
+            _ => Err("Json must be a primitive".to_string()),
+        }
+    }
+}
+
+/// java: FabricLoader.getInstance().getConfigDir() (engine seam; the port reads the
+/// loader's config dir from CONTINUITY_CONFIG_DIR, defaulting to ./config).
+pub fn fabric_loader_get_config_dir() -> PathBuf {
+    std::env::var_os("CONTINUITY_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("config"))
+}
+
+/// java: client.config.ContinuityConfig.
+pub struct ContinuityConfig {
+    file: PathBuf,
+    /// java: Object2ObjectLinkedOpenHashMap<String, Option<?>> (insertion order).
+    option_map: Vec<(String, Rc<BooleanOption>)>,
+    pub connected_textures: Rc<BooleanOption>,
+    pub emissive_textures: Rc<BooleanOption>,
+    pub custom_block_layers: Rc<BooleanOption>,
+    pub use_manual_culling: Rc<BooleanOption>,
+}
+
+thread_local! {
+    static INSTANCE: Rc<ContinuityConfig> = Rc::new(build_instance());
+}
+
+fn build_instance() -> ContinuityConfig {
+    // java: static INSTANCE = new ContinuityConfig(FabricLoader.getInstance()
+    // .getConfigDir().resolve("continuity.json").toFile()); static { INSTANCE.load(); }
+    let config = ContinuityConfig::new(fabric_loader_get_config_dir().join("continuity.json"));
+    config.load();
+    config
+}
+
+/// java: ContinuityConfig.INSTANCE singleton.
+pub fn config_instance() -> Rc<ContinuityConfig> {
+    INSTANCE.with(|config| config.clone())
+}
+
+impl ContinuityConfig {
+    pub fn new(file: PathBuf) -> ContinuityConfig {
+        // java: the four addOption(...) field initializers.
+        let connected_textures = Rc::new(BooleanOption::new("connected_textures", true));
+        let emissive_textures = Rc::new(BooleanOption::new("emissive_textures", true));
+        let custom_block_layers = Rc::new(BooleanOption::new("custom_block_layers", true));
+        let use_manual_culling = Rc::new(BooleanOption::new("use_manual_culling", true));
+        let mut option_map = Vec::new();
+        for option in [&connected_textures, &emissive_textures, &custom_block_layers, &use_manual_culling] {
+            // java: addOption (duplicate keys warn upstream; the four keys are distinct).
+            option_map.push((option.get_key().to_string(), option.clone()));
+        }
+        ContinuityConfig {
+            file,
+            option_map,
+            connected_textures,
+            emissive_textures,
+            custom_block_layers,
+            use_manual_culling,
+        }
+    }
+
+    /// java: load(): read the file when it exists, then always save().
+    pub fn load(&self) {
+        if self.file.exists() {
+            match std::fs::read_to_string(&self.file) {
+                Ok(text) => match parse_json(&text) {
+                    Ok(json) => self.from_json(&json),
+                    Err(error) => eprintln!("Could not load config from file '{}': {}", self.file.display(), error),
+                },
+                Err(error) => eprintln!("Could not load config from file '{}': {}", self.file.display(), error),
+            }
+        }
+        self.save();
+    }
+
+    /// java: save().
+    pub fn save(&self) {
+        let json = self.to_json();
+        let text = json_to_string(&json);
+        if let Err(error) = std::fs::write(&self.file, text) {
+            eprintln!("Could not save config to file '{}': {}", self.file.display(), error);
+        }
+    }
+
+    /// java: fromJson(JsonElement): object entries in map order, per-entry parse
+    /// errors logged and skipped; non-object throws JsonParseException("Json must be an object").
+    pub fn from_json(&self, json: &JsonElement) {
+        if json.is_json_object() {
+            for (key, option) in &self.option_map {
+                if let Some(element) = json.get(key) {
+                    if let Err(error) = option.from_json(element) {
+                        eprintln!("Could not read option '{}': {}", key, error);
                     }
                 }
-                _ => {}
             }
+        } else {
+            eprintln!("Could not load config: Json must be an object");
         }
-        if blocks.is_empty() || tiles.is_empty() {
-            return None;
+    }
+
+    /// java: toJson().
+    pub fn to_json(&self) -> JsonElement {
+        JsonElement::Object(
+            self.option_map
+                .iter()
+                .map(|(key, option)| (key.clone(), option.to_json()))
+                .collect(),
+        )
+    }
+
+    /// java: getOption(String key).
+    pub fn get_option(&self, key: &str) -> Option<Rc<BooleanOption>> {
+        self.option_map.iter().find(|(k, _)| k == key).map(|(_, option)| option.clone())
+    }
+
+    /// java: getOptionMapView() (the port exposes the insertion-ordered entries).
+    pub fn get_option_map_view(&self) -> Vec<(String, Rc<BooleanOption>)> {
+        self.option_map.clone()
+    }
+}
+
+/// Engine seam: the minimal Gson reader for the config's own output (an object of
+/// boolean primitives, whitespace allowed).
+fn parse_json(text: &str) -> Result<JsonElement, String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return Err("Json must be an object".to_string());
+    }
+    let mut entries = Vec::new();
+    let body = &trimmed[1..trimmed.len() - 1];
+    for entry in body.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
         }
-        Some(Self {
-            blockstates: blocks,
-            method: method.unwrap_or(Method::Ctm),
-            tiles,
-        })
+        let Some(colon) = entry.find(':') else {
+            return Err(format!("Malformed entry '{}'", entry));
+        };
+        let key = entry[..colon].trim().trim_matches('"').to_string();
+        let value_text = entry[colon + 1..].trim();
+        match value_text {
+            "true" => entries.push((key, JsonElement::Primitive(true))),
+            "false" => entries.push((key, JsonElement::Primitive(false))),
+            other => return Err(format!("Unsupported value '{}'", other)),
+        }
+    }
+    Ok(JsonElement::Object(entries))
+}
+
+/// Engine seam: the minimal Gson writer for the config's shape (pretty-printed
+/// object of boolean primitives).
+fn json_to_string(json: &JsonElement) -> String {
+    match json {
+        JsonElement::Object(entries) => {
+            let lines: Vec<String> = entries
+                .iter()
+                .map(|(key, value)| {
+                    let value_text = match value {
+                        JsonElement::Primitive(inner) => inner.to_string(),
+                        _ => String::new(),
+                    };
+                    format!("  \"{}\": {}", key, value_text)
+                })
+                .collect();
+            format!("{{\n{}\n}}", lines.join(",\n"))
+        }
+        _ => String::new(),
     }
 }
 
@@ -100,46 +288,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_optifine_style_properties() {
-        let r = Rule::parse(
-            "# glass rules\nmatchBlocks=glass\nmethod=ctm_compact\ntiles=0-4\n",
-        )
-        .unwrap();
-        assert_eq!(r.blockstates, ["glass"]);
-        assert_eq!(r.method, Method::CtmCompact);
-        assert_eq!(r.tiles, ["0", "1", "2", "3", "4"]);
+    fn options_round_trip_defaults() {
+        let config = ContinuityConfig::new(std::env::temp_dir().join(format!("cont-cfg-{}.json", std::process::id())));
+        assert!(config.connected_textures.get());
+        assert!(config.emissive_textures.get());
+        assert!(config.custom_block_layers.get());
+        assert!(config.use_manual_culling.get());
+        let json = config.to_json();
+        assert_eq!(
+            json,
+            JsonElement::Object(vec![
+                ("connected_textures".to_string(), JsonElement::Primitive(true)),
+                ("emissive_textures".to_string(), JsonElement::Primitive(true)),
+                ("custom_block_layers".to_string(), JsonElement::Primitive(true)),
+                ("use_manual_culling".to_string(), JsonElement::Primitive(true)),
+            ])
+        );
     }
 
     #[test]
-    fn named_tiles_split_on_commas_and_spaces() {
-        let r = Rule::parse("matchBlocks=stone\nmethod=random\ntiles=a b, c\n").unwrap();
-        assert_eq!(r.tiles, ["a", "b", "c"]);
+    fn from_json_updates_and_rejects_bad_entries() {
+        let config = ContinuityConfig::new(std::env::temp_dir().join(format!("cont-cfg-{}.json", std::process::id())));
+        let json = JsonElement::Object(vec![
+            ("connected_textures".to_string(), JsonElement::Primitive(false)),
+            ("emissive_textures".to_string(), JsonElement::Object(vec![])),
+        ]);
+        config.from_json(&json);
+        assert!(!config.connected_textures.get());
+        // the malformed entry is skipped, the option keeps its default
+        assert!(config.emissive_textures.get());
+        config.connected_textures.set(true);
     }
 
     #[test]
-    fn missing_method_defaults_to_full_ctm() {
-        let r = Rule::parse("matchBlocks=stone\ntiles=t0\n").unwrap();
-        assert_eq!(r.method, Method::Ctm);
+    fn boolean_option_from_json_rejects_non_primitive() {
+        let option = BooleanOption::new("k", true);
+        assert!(option.from_json(&JsonElement::Object(vec![])).is_err());
+        option.from_json(&JsonElement::Primitive(false)).unwrap();
+        assert!(!option.get());
     }
 
     #[test]
-    fn no_blocks_or_no_tiles_is_not_a_rule() {
-        assert!(Rule::parse("method=horizontal\ntiles=0\n").is_none());
-        assert!(Rule::parse("matchBlocks=stone\nmethod=horizontal\n").is_none());
-    }
-
-    #[test]
-    fn unknown_method_and_keys_are_ignored() {
-        let r = Rule::parse("matchBlocks=stone\nmethod=holographic\ntiles=x\nlayer=0\n").unwrap();
-        assert_eq!(r.method, Method::Ctm);
-        assert_eq!(r.tiles, ["x"]);
-    }
-
-    #[test]
-    fn tile_saturates_on_short_list() {
-        let r = Rule::new("stone", Method::Horizontal, vec!["a".into(), "b".into(), "c".into(), "d".into()]);
-        assert_eq!(r.tile(3), "d");
-        let short = Rule::new("stone", Method::Horizontal, vec!["only".into()]);
-        assert_eq!(short.tile(3), "only");
+    fn save_and_load_round_trip() {
+        let path = std::env::temp_dir().join(format!("cont-cfg-rt-{}.json", std::process::id()));
+        let config = ContinuityConfig::new(path.clone());
+        config.use_manual_culling.set(false);
+        config.save();
+        let reloaded = ContinuityConfig::new(path.clone());
+        reloaded.load();
+        assert!(!reloaded.use_manual_culling.get());
+        assert!(reloaded.connected_textures.get());
+        let _ = std::fs::remove_file(path);
     }
 }
