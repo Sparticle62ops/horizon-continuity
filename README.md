@@ -33,12 +33,36 @@ one seam per upstream call.
   entity renderer mixins.
 
 The engine-bound surfaces (block model rendering, atlas json loading, GUI)
-sit behind seams; `mixins/continuity/runtime.rs` is the native mod entry
-wiring the upstream `ContinuityClient` init and reload order.
+sit behind seams; `src/lib.rs` is the native mod entry: it wires the four
+config booleans as mod API settings, initializes the core on `client_setup`
+exactly as `ContinuityClient.onInitializeClient` does (the CTM loader
+registry, the model-wrapping plugin, the custom-block-layers reload
+listener), and re-applies the wrap flags from the settings on every
+resource reload.
 
 Port: sparticle. Upstream license and credit carried: the crate is
 LGPL-3.0-only, copyright (c) PepperCode1. The license text ships with the
 source.
+
+## Horizon mod API wiring
+
+- The four config booleans (connected textures, emissive textures, custom
+  block layers, manual culling) are settings on Horizon's Options > Mods
+  page, same defaults.
+- `client_setup` runs the core init: the 25 CTM loader registrations, the
+  model-wrapping plugin, and the custom-block-layers reload listener.
+- `client_resources_reloaded` re-applies the wrap flags on every reload,
+  the original's `ValueFlag::ReloadWorldRenderer` effect.
+
+## Tracked gaps
+
+- The quad wrap itself runs in the engine's model-bake pass; the pinned
+  mod API has no baked-geometry hook (horizon-rust/horizon#861:
+  `model_baking_completed` gives no view of the baked geometry and edits
+  nothing). Models bake un-wrapped until that lands.
+- The reload event carries no ResourceManager handle, so the core's reload
+  listeners (the custom-block-layers scan, the .ctm.properties redirect)
+  wait on the same engine integration.
 
 ## Tests
 

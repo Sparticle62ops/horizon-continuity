@@ -1,0 +1,6 @@
+{
+  "setting.continuity.connected_textures": "Connected textures",
+  "setting.continuity.emissive_textures": "Emissive textures",
+  "setting.continuity.custom_block_layers": "Custom block layers",
+  "setting.continuity.use_manual_culling": "Use manual culling"
+}
