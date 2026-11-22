@@ -26,16 +26,18 @@
 //!
 //! Gaps, tracked: the quad wrap itself runs in the engine's model-bake
 //! pass, and the pinned mod API has no baked-geometry hook
-//! (horizon-rust/horizon#861: `model_baking_completed` gives no view of
+//! (horizon-rust/horizon#19759: `model_baking_completed` gives no view of
 //! the baked geometry and edits nothing), so models bake un-wrapped until
 //! that lands. The reload event also carries no ResourceManager handle,
 //! so the core's reload listeners (the custom-block-layers scan, the
 //! .ctm.properties redirect) wait on the same engine integration.
 use std::rc::Rc;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use mod_api::{
     self, ClientHost, ClientResourcesReloadedEvent, ClientSetupEvent, RegistrationContext,
-    Registrar, SettingSpec,
+    Registrar, SettingChangedEvent, SettingSpec,
 };
 
 pub mod baked_model_manager_reload;
@@ -87,30 +89,52 @@ impl mod_api::Hooks for Mod {
 
     /// 1:1 of ContinuityClient.onInitializeClient (the CTM loader registry)
     /// plus the model-wrapping and custom-block-layers core init, with the
-    /// wrap flags applied from the settings the client has.
-    fn client_setup(&self, host: &mut dyn ClientHost, _event: &mut ClientSetupEvent) {
+    /// wrap flags applied from the settings' current values (upstream's
+    /// defaults until the player changes one: `setting_bool` is a world-only
+    /// read and is not reachable in Setup).
+    fn client_setup(&self, _host: &mut dyn ClientHost, _event: &mut ClientSetupEvent) {
         continuity_client::on_initialize_client();
         model_wrapping::init();
         custom_block_layers::ReloadListener::init();
-        sync_wrapping(host);
+        apply_wrapping();
+    }
+
+    /// The player changed one of the mod's settings on Options > Mods; this
+    /// is where `setting_bool` is readable, so the wrap flags re-read and
+    /// the handler rebuilds, as the original's config screen callback does.
+    fn setting_changed(&self, host: &mut dyn ClientHost, event: &mut SettingChangedEvent<'_>) {
+        if matches!(
+            event.key,
+            "connected_textures" | "emissive_textures" | "custom_block_layers" | "use_manual_culling"
+        ) {
+            WRAP_CTM.store(host.setting_bool("connected_textures").unwrap_or(true), Ordering::Relaxed);
+            WRAP_EMISSIVE.store(host.setting_bool("emissive_textures").unwrap_or(true), Ordering::Relaxed);
+            apply_wrapping();
+        }
     }
 
     /// The settings' reload effect, as the original's config screen has it:
-    /// the wrapping flags re-apply on every successful resource reload.
+    /// the wrapping flags re-apply on every successful resource reload
+    /// (the handler rebuilds from the stored flags; `setting_bool` is not
+    /// reachable in Reloading).
     fn client_resources_reloaded(
         &self,
-        host: &mut dyn ClientHost,
+        _host: &mut dyn ClientHost,
         _event: &mut ClientResourcesReloadedEvent,
     ) {
-        sync_wrapping(host);
+        apply_wrapping();
     }
 }
 
-/// The wrap flags from the settings, driving the 1:1 wrapping handler the
-/// engine-side plugin consults.
-fn sync_wrapping(host: &dyn ClientHost) {
-    let wrap_ctm = host.setting_bool("connected_textures").unwrap_or(true);
-    let wrap_emissive = host.setting_bool("emissive_textures").unwrap_or(true);
-    let handler = model_wrapping::ModelWrappingHandler::create(wrap_ctm, wrap_emissive);
+/// The wrap flags, driving the 1:1 wrapping handler the engine-side plugin
+/// consults. Defaults are the original's config defaults (both on).
+static WRAP_CTM: AtomicBool = AtomicBool::new(true);
+static WRAP_EMISSIVE: AtomicBool = AtomicBool::new(true);
+
+fn apply_wrapping() {
+    let handler = model_wrapping::ModelWrappingHandler::create(
+        WRAP_CTM.load(Ordering::Relaxed),
+        WRAP_EMISSIVE.load(Ordering::Relaxed),
+    );
     model_wrapping::continuity_set_model_wrapping_handler(handler.map(Rc::new));
 }

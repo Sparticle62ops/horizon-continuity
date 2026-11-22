@@ -174,7 +174,10 @@ impl ContinuityConfig {
         }
     }
 
-    /// java: load(): read the file when it exists, then always save().
+    /// java: load(): read the file when it exists. Upstream also saves on every
+/// load; here the write side stops running at startup, because the values
+/// now live on Horizon's Options > Mods page and rewriting this file every
+/// start would shadow them. save() stays for the round-trip contract.
     pub fn load(&self) {
         if self.file.exists() {
             match std::fs::read_to_string(&self.file) {
@@ -185,7 +188,6 @@ impl ContinuityConfig {
                 Err(error) => eprintln!("Could not load config from file '{}': {}", self.file.display(), error),
             }
         }
-        self.save();
     }
 
     /// java: save().

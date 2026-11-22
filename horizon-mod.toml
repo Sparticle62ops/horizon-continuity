@@ -1,7 +1,7 @@
 id = "continuity"
 name = "Continuity"
 version = "1.0.0"
-description = "Connected textures: an exact 1:1 Rust port of Continuity by PepperCode1 (LGPL-3.0-only). The four config booleans (connected textures, emissive textures, custom block layers, manual culling) are on Horizon's Options > Mods page. The baked-model wrap itself waits on horizon-rust/horizon#861, the baked-geometry hook the port needs."
+description = "Connected textures: an exact 1:1 Rust port of Continuity by PepperCode1 (LGPL-3.0-only). The four config booleans (connected textures, emissive textures, custom block layers, manual culling) are on Horizon's Options > Mods page. The baked-model wrap itself waits on horizon-rust/horizon#19759, the baked-geometry hook the port needs."
 authors = ["sparticle"]
 license = "LGPL-3.0-only"
 homepage = "https://github.com/Sparticle62ops/horizon-continuity"

@@ -51,13 +51,18 @@ source.
   page, same defaults.
 - `client_setup` runs the core init: the 25 CTM loader registrations, the
   model-wrapping plugin, and the custom-block-layers reload listener.
+- `setting_changed` reads the toggles where the mod API allows
+  `setting_bool` and rebuilds the wrapping handler; `client_setup` and
+  `client_resources_reloaded` re-apply the stored flags without reading
+  the host (the wrap flags default to the original's config defaults
+  until the first change).
 - `client_resources_reloaded` re-applies the wrap flags on every reload,
   the original's `ValueFlag::ReloadWorldRenderer` effect.
 
 ## Tracked gaps
 
 - The quad wrap itself runs in the engine's model-bake pass; the pinned
-  mod API has no baked-geometry hook (horizon-rust/horizon#861:
+  mod API has no baked-geometry hook (horizon-rust/horizon#19759:
   `model_baking_completed` gives no view of the baked geometry and edits
   nothing). Models bake un-wrapped until that lands.
 - The reload event carries no ResourceManager handle, so the core's reload
